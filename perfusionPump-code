@@ -1,0 +1,205 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <Keypad.h>
+
+// LCD tanımı
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Step motor pinleri
+#define stepPin 24
+#define dirPin 22
+#define buzzerPin 31
+
+// Mikrostepping ve vidalı mil bilgisi
+const int microstep = 16;
+const float stepsPerRev = 200.0;
+const float lead_mm = 8.0;
+float stepsPerMM = (stepsPerRev * microstep) / lead_mm;
+
+// Keypad tanımı
+const byte ROWS = 4;
+const byte COLS = 4;
+char keys[ROWS][COLS] = {
+  {'1','2','3','A'},
+  {'4','5','6','B'},
+  {'7','8','9','C'},
+  {'*','0','#','D'}
+};
+byte rowPins[ROWS] = {43, 42, 41, 40};
+byte colPins[COLS] = {39, 38, 37, 36};
+Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+
+// mL – mm dönüşümü
+float getDistanceForML(int ml) {
+  switch (ml) {
+    case 60: return 110.0; case 55: return 99.0;
+    case 50: return 90.0;  case 45: return 81.0;
+    case 40: return 72.0;  case 35: return 63.0;
+    case 30: return 54.0;  case 25: return 45.0;
+    case 20: return 36.0;  case 15: return 27.0;
+    case 10: return 18.0;  case 5:  return 9.0;
+    default: return ml * 1.8333;
+  }
+}
+
+int getNumberInput(String prompt) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(prompt);
+  String input = "";
+  while (true) {
+    char key = keypad.getKey();
+    if (key >= '0' && key <= '9') {
+      input += key;
+      lcd.setCursor(0, 1);
+      lcd.print(input);
+    } else if (key == '#') {
+      break;
+    }
+  }
+  return input.toInt();
+}
+
+void printTime(int secondsLeft) {
+  int mins = secondsLeft / 60;
+  int secs = secondsLeft % 60;
+  lcd.setCursor(0, 1);
+lcd.print("Kalan: ");
+if (mins < 10) lcd.print("0");
+lcd.print(mins);
+lcd.print(":");
+if (secs < 10) lcd.print("0");
+lcd.print(secs);
+}
+
+void runMotor(int volume, int durationMin) {
+  float mmToMove = getDistanceForML(volume);
+  long totalSteps = mmToMove * stepsPerMM;
+  long durationSec = durationMin * 60;
+  float stepDelayMicros = (float)durationSec * 1000000.0 / totalSteps;
+
+  float stepDelayMicros_BACKWARD = (30.0 / totalSteps) * 1000000.0;
+  if (stepDelayMicros_BACKWARD < 1000) stepDelayMicros_BACKWARD = 1000;
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Ilac: ");
+  lcd.print(volume);
+  lcd.print(" mL");
+ unsigned long lastTimeUpdate = millis(); // Zamanı burada başlat
+  unsigned long startTime = millis();      // Motor çalışma süresi takibi
+
+  digitalWrite(dirPin, LOW);
+  for (long i = 0; i < totalSteps; i++) {
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(stepDelayMicros - 10);
+
+    // Gerçek zamanlı sayaç güncellemesi
+    if (millis() - lastTimeUpdate >= 1000 && durationSec > 0) {
+      durationSec--;
+      printTime(durationSec);
+      lastTimeUpdate = millis();
+    }
+  }
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Perfuzyon Bitti");
+  lcd.setCursor(0, 1);
+  lcd.print("B = Geri Sar");
+
+  digitalWrite(buzzerPin, HIGH);
+
+  while (true) {
+     if (digitalRead(53) == HIGH) {
+      Serial1.println("PERFÜZYON BİTTİ - SIVI VAR");
+    } else {
+      Serial1.println("PERFÜZYON BİTTİ - SIVI YOK");
+    }
+    unsigned long startTime = millis();
+    while (millis() - startTime < 5000) {
+      char key = keypad.getKey();
+      if (key == 'B') {
+        digitalWrite(buzzerPin, LOW);
+        goto startRewind;
+      }
+    }
+  }
+
+startRewind:
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Geri Sariliyor...");
+  digitalWrite(dirPin, HIGH);
+  for (long i = 0; i < totalSteps; i++) {
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(stepDelayMicros_BACKWARD - 10);
+  }
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Hazir. A'ya Basin");
+  delay(1500);
+}
+
+void setup() {
+  lcd.init();
+  lcd.backlight();
+  pinMode(stepPin, OUTPUT);
+  pinMode(dirPin, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+  digitalWrite(buzzerPin, LOW);
+  Serial.begin(9600);
+  Serial1.begin(9600);
+}
+
+void loop() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Perfuzyon Sistemi");
+
+  int state = 0;
+  int volumeML = 0;
+  int durationMin = 0;
+
+  while (true) {
+    if (Serial1.available()) {
+      String input = Serial1.readStringUntil('\n');
+      input.trim();
+      if (input.indexOf(':') > 0) {
+        int colonIndex = input.indexOf(':');
+        volumeML = input.substring(0, colonIndex).toInt();
+        durationMin = input.substring(colonIndex + 1).toInt();
+        runMotor(volumeML, durationMin);
+        break;
+      }
+    }
+
+    char key = keypad.getKey();
+    if (key == 'A') {
+      if (state == 0) {
+        volumeML = getNumberInput("Hacim (mL):");
+        state = 1;
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("A -> Sure girisi");
+        delay(1000);
+      } else if (state == 1) {
+        durationMin = getNumberInput("Sure (dk):");
+        state = 2;
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("A -> Motor Calisir");
+        delay(1000);
+      } else if (state == 2) {
+        runMotor(volumeML, durationMin);
+        break;
+      }
+    }
+  }
+}
+ 
